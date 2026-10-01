@@ -5,24 +5,47 @@ import json
 
 app = Flask(__name__)
 
-def get_stream_fallback(video_id):
-    instances = [
-        f"https://inv.nadeko.net/api/v1/videos/{video_id}",
-        f"https://invidious.nerdvpn.de/api/v1/videos/{video_id}",
-        f"https://yt.artemislena.eu/api/v1/videos/{video_id}"
-    ]
-    for url in instances:
+INVIDIOUS_INSTANCES = [
+    "https://inv.nadeko.net",
+    "https://invidious.nerdvpn.de",
+    "https://yt.artemislena.eu",
+    "https://invidious.drgns.space"
+]
+
+def get_stream_from_invidious(video_id):
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    for base_url in INVIDIOUS_INSTANCES:
         try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=4) as response:
-                if response.status == 200:
-                    data = json.loads(response.read().decode())
-                    for fmt in data.get('formatStreams', []):
-                        if fmt.get('url'):
-                            return fmt['url']
+            url = f"{base_url}/api/v1/videos/{video_id}"
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode('utf-8'))
+                    formats = data.get('formatStreams', [])
+                    for f in formats:
+                        if f.get('container') == 'mp4' or 'video/mp4' in f.get('type', ''):
+                            return f.get('url'), data.get('title', 'Video')
+                    if formats:
+                        return formats[0].get('url'), data.get('title', 'Video')
         except Exception:
             continue
-    return None
+    return None, None
+
+def get_stream_from_ytdlp(video_id):
+    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+    ydl_opts = {
+        'format': 'best[ext=mp4]/best',
+        'quiet': True,
+        'no_warnings': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios', 'android']
+            }
+        }
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(youtube_url, download=False)
+        return info.get('url'), info.get('title', 'Video')
 
 @app.route('/stream', methods=['GET'])
 def get_stream_url():
@@ -30,35 +53,20 @@ def get_stream_url():
     if not video_id:
         return jsonify({'success': False, 'error': 'ID missing'}), 400
 
-    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+    # 1. Fast & Unblocked Invidious Engine
+    stream_url, title = get_stream_from_invidious(video_id)
+    if stream_url:
+        return jsonify({'success': True, 'title': title, 'stream_url': stream_url})
 
-    # iOS innertube client YouTube bot detection bypass karta hai
-    ydl_opts = {
-        'format': 'best[ext=mp4]/best',
-        'quiet': True,
-        'no_warnings': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['ios', 'android', 'mweb']
-            }
-        }
-    }
-
+    # 2. yt-dlp iOS Fallback
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(youtube_url, download=False)
-            stream_url = info.get('url')
-            title = info.get('title', 'Video')
-            if stream_url:
-                return jsonify({'success': True, 'title': title, 'stream_url': stream_url})
+        stream_url, title = get_stream_from_ytdlp(video_id)
+        if stream_url:
+            return jsonify({'success': True, 'title': title, 'stream_url': stream_url})
     except Exception as e:
-        print("yt-dlp error:", str(e))
+        pass
 
-    fallback_url = get_stream_fallback(video_id)
-    if fallback_url:
-        return jsonify({'success': True, 'title': 'Video', 'stream_url': fallback_url})
-
-    return jsonify({'success': False, 'error': 'Stream fetch failed'}), 500
+    return jsonify({'success': False, 'error': 'Stream extraction failed'}), 500
 
 @app.route('/', methods=['GET'])
 def home():
